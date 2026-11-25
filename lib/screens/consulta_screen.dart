@@ -1,15 +1,20 @@
 import 'package:flutter/material.dart';
 
 import '../data/materiales.dart';
+import '../models/registro_reciclaje.dart';
 import '../state/reciclaje_state.dart';
 import '../theme/app_theme.dart';
+import '../utils/dialogos.dart';
+import '../utils/errores.dart';
 import '../utils/formato.dart';
 import '../utils/mensajes.dart';
 import '../widgets/barras_semana.dart';
+import '../widgets/estado_sync.dart';
 import '../widgets/registro_tile.dart';
 import '../widgets/stat_card.dart';
+import 'detalle_screen.dart';
 
-/// PANTALLA 3: consulta y resultados (historial + impacto personal).
+/// PANTALLA 2: consulta/listado (registros leídos desde Firestore) + impacto personal.
 class ConsultaScreen extends StatefulWidget {
   final ValueChanged<int> onIrA;
 
@@ -42,10 +47,72 @@ class _ConsultaScreenState extends State<ConsultaScreen> {
       ),
     );
     if (confirmar == true) {
-      estadoApp.reiniciar();
-      setState(() => _filtroId = null);
-      if (!mounted) return;
-      mostrarMensaje(context, 'Historial borrado.', tipo: TipoMensaje.advertencia);
+      try {
+        await estadoApp.reiniciar();
+        setState(() => _filtroId = null);
+        if (!mounted) return;
+        mostrarMensaje(context, 'Historial borrado.',
+            tipo: TipoMensaje.advertencia);
+      } catch (e) {
+        if (!mounted) return;
+        mostrarMensaje(context, mensajeError(e), tipo: TipoMensaje.error);
+      }
+    }
+  }
+
+  Future<void> _abrirDetalle(RegistroReciclaje r) async {
+    final eliminado = await Navigator.push<RegistroReciclaje>(
+      context,
+      MaterialPageRoute(builder: (_) => DetalleScreen(registroId: r.id)),
+    );
+    if (eliminado != null && mounted) _avisoEliminado(eliminado);
+  }
+
+  void _avisoEliminado(RegistroReciclaje r) {
+    mostrarMensaje(
+      context,
+      'Registro eliminado de Firebase.',
+      tipo: TipoMensaje.advertencia,
+      accion: 'Deshacer',
+      onAccion: () async {
+        try {
+          await estadoApp.restaurar(r);
+        } catch (e) {
+          if (mounted) {
+            mostrarMensaje(context, mensajeError(e), tipo: TipoMensaje.error);
+          }
+        }
+      },
+    );
+  }
+
+  /// Pide confirmación y elimina. Devuelve false siempre: la fila desaparece
+  /// cuando Firestore notifica el cambio, no antes.
+  Future<bool> _confirmarYEliminar(RegistroReciclaje r) async {
+    final ok = await confirmarAccion(
+      context,
+      titulo: 'Eliminar registro',
+      mensaje: 'Se eliminará de la base de datos remota. ¿Deseas continuar?',
+    );
+    if (!ok || !mounted) return false;
+    try {
+      await estadoApp.eliminar(r.id);
+      if (mounted) _avisoEliminado(r);
+    } catch (e) {
+      if (mounted) {
+        mostrarMensaje(context, mensajeError(e), tipo: TipoMensaje.error);
+      }
+    }
+    return false;
+  }
+
+  Future<void> _refrescar() async {
+    try {
+      await estadoApp.refrescar();
+    } catch (e) {
+      if (mounted) {
+        mostrarMensaje(context, mensajeError(e), tipo: TipoMensaje.error);
+      }
     }
   }
 
@@ -86,8 +153,31 @@ class _ConsultaScreenState extends State<ConsultaScreen> {
             title: const Text('Mi impacto'),
             backgroundColor: AppColors.verde,
             foregroundColor: Colors.white,
+            actions: const [
+              Padding(
+                padding: EdgeInsets.only(right: 12),
+                child: Center(child: EstadoSync()),
+              ),
+            ],
           ),
-          body: estadoApp.estaVacio
+          body: estadoApp.cargando
+              ? const Center(child: CircularProgressIndicator())
+              : estadoApp.error != null
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(32),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.cloud_off,
+                            size: 70, color: AppColors.error),
+                        const SizedBox(height: 12),
+                        Text(estadoApp.error!, textAlign: TextAlign.center),
+                      ],
+                    ),
+                  ),
+                )
+              : estadoApp.estaVacio
               ? Center(
                   child: Padding(
                     padding: const EdgeInsets.all(32),
@@ -121,7 +211,10 @@ class _ConsultaScreenState extends State<ConsultaScreen> {
                     ),
                   ),
                 )
-              : ListView(
+              : RefreshIndicator(
+                  onRefresh: _refrescar,
+                  child: ListView(
+                  physics: const AlwaysScrollableScrollPhysics(),
                   padding: const EdgeInsets.all(16),
                   children: [
                     // ---- Tarjeta de nivel ----
@@ -319,6 +412,7 @@ class _ConsultaScreenState extends State<ConsultaScreen> {
                         (r) => Dismissible(
                           key: ValueKey(r.id),
                           direction: DismissDirection.endToStart,
+                          confirmDismiss: (_) => _confirmarYEliminar(r),
                           background: Container(
                             alignment: Alignment.centerRight,
                             padding: const EdgeInsets.only(right: 20),
@@ -329,22 +423,15 @@ class _ConsultaScreenState extends State<ConsultaScreen> {
                             ),
                             child: const Icon(Icons.delete, color: Colors.white),
                           ),
-                          onDismissed: (_) {
-                            estadoApp.eliminar(r.id);
-                            mostrarMensaje(
-                              context,
-                              'Registro eliminado.',
-                              tipo: TipoMensaje.advertencia,
-                              accion: 'Deshacer',
-                              onAccion: () => estadoApp.restaurar(r),
-                            );
-                          },
-                          child: RegistroTile(registro: r),
+                          child: GestureDetector(
+                            onTap: () => _abrirDetalle(r),
+                            child: RegistroTile(registro: r),
+                          ),
                         ),
                       ),
                     const SizedBox(height: 4),
                     const Text(
-                      'Desliza un registro hacia la izquierda para eliminarlo.',
+                      'Toca un registro para ver el detalle. Desliza a la izquierda para eliminarlo.',
                       textAlign: TextAlign.center,
                       style: TextStyle(fontSize: 12, color: AppColors.textoSuave),
                     ),
@@ -366,6 +453,7 @@ class _ConsultaScreenState extends State<ConsultaScreen> {
                       ),
                     ),
                   ],
+                ),
                 ),
         );
       },

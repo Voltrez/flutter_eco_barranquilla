@@ -1,0 +1,60 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- Funciones auxiliares ----------
+    function autenticado() {
+      return request.auth != null;
+    }
+    function esDueno(uid) {
+      return autenticado() && request.auth.uid == uid;
+    }
+    function registroValido(d) {
+      return d.keys().hasAll(['uid','materialId','kg','objetos','lugar','limpio','fecha','nota','puntos','co2'])
+        && d.materialId in ['plastico','vidrio','papel','metal','tetrapak','organico']
+        && d.kg is number && d.kg > 0 && d.kg <= 200
+        && d.objetos is int && d.objetos >= 1 && d.objetos <= 50
+        && d.lugar in ['puntoReciclaje','reciclador','institucion']
+        && d.limpio is bool
+        && d.nota is string && d.nota.size() <= 80;
+    }
+    function puntoValido(d) {
+      return d.nombre is string && d.nombre.size() >= 3 && d.nombre.size() <= 60
+        && d.materiales is list && d.materiales.size() >= 1;
+    }
+
+    // ---------- usuarios: cada quien solo ve y edita su perfil ----------
+    match /usuarios/{uid} {
+      allow read, create, update: if esDueno(uid);
+      allow delete: if false;
+    }
+
+    // ---------- registros: privados de cada usuario ----------
+    match /registros/{id} {
+      allow read: if autenticado() && resource.data.uid == request.auth.uid;
+      allow create: if autenticado()
+        && request.resource.data.uid == request.auth.uid
+        && registroValido(request.resource.data);
+      allow update: if autenticado()
+        && resource.data.uid == request.auth.uid
+        && request.resource.data.uid == request.auth.uid
+        && registroValido(request.resource.data);
+      allow delete: if autenticado() && resource.data.uid == request.auth.uid;
+    }
+
+    // ---------- puntos_reciclaje: lectura comunitaria, edición solo del autor ----------
+    match /puntos_reciclaje/{id} {
+      allow read: if autenticado();
+      allow create: if autenticado()
+        && request.resource.data.creadoPor == request.auth.uid
+        && puntoValido(request.resource.data);
+      allow update, delete: if autenticado()
+        && resource.data.creadoPor == request.auth.uid;
+    }
+
+    // Todo lo demás está bloqueado.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

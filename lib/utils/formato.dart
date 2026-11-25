@@ -13,3 +13,9 @@ String kgTexto(double kg) => kg.toStringAsFixed(1);
 /// Convierte "2,5" o "2.5" en 2.5. Devuelve null si no es un número.
 double? parsearKg(String? texto) =>
     double.tryParse((texto ?? '').trim().replaceAll(',', '.'));
+
+String fechaHora(DateTime f) {
+  final h = f.hour.toString().padLeft(2, '0');
+  final m = f.minute.toString().padLeft(2, '0');
+  return '${fechaCorta(f)}, $h:$m';
+}

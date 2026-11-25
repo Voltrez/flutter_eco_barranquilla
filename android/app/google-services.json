@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "53335095250",
+    "project_id": "eco-barranquilla",
+    "storage_bucket": "eco-barranquilla.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:53335095250:android:a71c1f2c585a2e7b4b7a0b",
+        "android_client_info": {
+          "package_name": "com.example.flutter_application_eco_barranquilla"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBsZ0ZXg6ooXqTvbE68ST7iiFlkxFQhD-c"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -5,6 +6,9 @@ import 'package:flutter/material.dart';
 import '../data/materiales.dart';
 import '../models/material_reciclable.dart';
 import '../models/registro_reciclaje.dart';
+import '../services/escritura.dart';
+import '../services/registro_repository.dart';
+import '../utils/errores.dart';
 
 class NivelEco {
   final String nombre;
@@ -20,14 +24,86 @@ const List<NivelEco> nivelesEco = [
   NivelEco('Guardián', 600, Icons.shield),
 ];
 
-/// Estado en memoria de toda la app (sin base de datos).
-/// Contiene la LÓGICA: cálculo de puntos, CO2, racha y niveles.
+/// Estado de la app sincronizado con Cloud Firestore.
+/// - La LISTA se alimenta en tiempo real desde la base de datos remota.
+/// - Cada acción (registrar, actualizar, eliminar) se escribe en Firestore.
+/// - Contiene además la LÓGICA: cálculo de puntos, CO2, racha y niveles.
 class ReciclajeState extends ChangeNotifier {
-  final List<RegistroReciclaje> _registros = [];
-  int _siguienteId = 1;
+  final RegistroRepository _repo = RegistroRepository();
+  StreamSubscription? _suscripcion;
+  String? _uid;
+
+  List<RegistroReciclaje> _registros = [];
+  bool cargando = true;
+  String? error;
+
+  /// true mientras haya cambios locales que el servidor aún no confirma.
+  bool pendiente = false;
+
+  /// true si los datos vienen de la caché del dispositivo (sin servidor).
+  bool desdeCache = false;
 
   List<RegistroReciclaje> get registros => List.unmodifiable(_registros);
   bool get estaVacio => _registros.isEmpty;
+
+  RegistroReciclaje? porId(String id) {
+    for (final r in _registros) {
+      if (r.id == id) return r;
+    }
+    return null;
+  }
+
+  // ---------- Conexión con Firestore ----------
+  /// Empieza a escuchar los registros del usuario autenticado.
+  void iniciar(String uid) {
+    if (_uid == uid && _suscripcion != null) return;
+    _suscripcion?.cancel();
+    _uid = uid;
+    _registros = [];
+    cargando = true;
+    error = null;
+    notifyListeners();
+
+    _suscripcion = _repo.escuchar(uid).listen(
+      (snap) {
+        _registros = snap.docs
+            .map(RegistroReciclaje.desdeDoc)
+            .whereType<RegistroReciclaje>()
+            .toList();
+        _ordenar();
+        cargando = false;
+        error = null;
+        pendiente = snap.metadata.hasPendingWrites;
+        desdeCache = snap.metadata.isFromCache;
+        notifyListeners();
+      },
+      onError: (Object e) {
+        cargando = false;
+        error = mensajeError(e);
+        notifyListeners();
+      },
+    );
+  }
+
+  /// Deja de escuchar y limpia los datos (al cerrar sesión).
+  void detener() {
+    _suscripcion?.cancel();
+    _suscripcion = null;
+    _uid = null;
+    _registros = [];
+    cargando = true;
+    error = null;
+    pendiente = false;
+    desdeCache = false;
+    notifyListeners();
+  }
+
+  /// Lee directamente del servidor (deslizar para actualizar).
+  Future<void> refrescar() async {
+    final uid = _uid;
+    if (uid == null) return;
+    await _repo.leerDelServidor(uid);
+  }
 
   // ---------- Cálculos ----------
   /// Puntos = kg x puntos del material x multiplicador.
@@ -45,8 +121,10 @@ class ReciclajeState extends ChangeNotifier {
   static double calcularCo2(MaterialReciclable material, double kg) =>
       kg * material.co2PorKg;
 
-  // ---------- Acciones ----------
-  RegistroReciclaje _crear({
+  // ---------- Acciones (escriben en Firestore) ----------
+  RegistroReciclaje _construir({
+    required String id,
+    required String uid,
     required MaterialReciclable material,
     required double kg,
     required int objetos,
@@ -56,7 +134,8 @@ class ReciclajeState extends ChangeNotifier {
     String nota = '',
   }) {
     return RegistroReciclaje(
-      id: _siguienteId++,
+      id: id,
+      uid: uid,
       material: material,
       kg: kg,
       objetos: objetos,
@@ -77,11 +156,21 @@ class ReciclajeState extends ChangeNotifier {
   void _ordenar() {
     _registros.sort((a, b) {
       final porFecha = b.fecha.compareTo(a.fecha);
-      return porFecha != 0 ? porFecha : b.id.compareTo(a.id);
+      if (porFecha != 0) return porFecha;
+      final ca = a.creadoEn ?? DateTime.now();
+      final cb = b.creadoEn ?? DateTime.now();
+      return cb.compareTo(ca);
     });
   }
 
-  RegistroReciclaje registrar({
+  String get _uidActivo {
+    final uid = _uid;
+    if (uid == null) throw StateError('No hay una sesión iniciada.');
+    return uid;
+  }
+
+  /// CREAR: guarda un nuevo documento en `registros`.
+  Future<(RegistroReciclaje, ResultadoEscritura)> registrar({
     required MaterialReciclable material,
     required double kg,
     required int objetos,
@@ -89,8 +178,10 @@ class ReciclajeState extends ChangeNotifier {
     required bool limpio,
     required DateTime fecha,
     String nota = '',
-  }) {
-    final registro = _crear(
+  }) async {
+    final registro = _construir(
+      id: _repo.nuevoId(),
+      uid: _uidActivo,
       material: material,
       kg: kg,
       objetos: objetos,
@@ -99,52 +190,72 @@ class ReciclajeState extends ChangeNotifier {
       fecha: fecha,
       nota: nota,
     );
-    _registros.add(registro);
-    _ordenar();
-    notifyListeners();
-    return registro;
+    final resultado = await _repo.crear(registro);
+    return (registro, resultado);
   }
 
-  void eliminar(int id) {
-    _registros.removeWhere((r) => r.id == id);
-    notifyListeners();
+  /// ACTUALIZAR: modifica un documento existente (recalcula puntos y CO2).
+  Future<ResultadoEscritura> actualizar(
+    RegistroReciclaje original, {
+    required MaterialReciclable material,
+    required double kg,
+    required int objetos,
+    required LugarEntrega lugar,
+    required bool limpio,
+    required DateTime fecha,
+    String nota = '',
+  }) {
+    final nuevo = _construir(
+      id: original.id,
+      uid: original.uid,
+      material: material,
+      kg: kg,
+      objetos: objetos,
+      lugar: lugar,
+      limpio: limpio,
+      fecha: fecha,
+      nota: nota,
+    );
+    return _repo.actualizar(nuevo);
   }
 
-  void restaurar(RegistroReciclaje registro) {
-    _registros.add(registro);
-    _ordenar();
-    notifyListeners();
-  }
+  /// ELIMINAR: borra el documento de la base de datos remota.
+  Future<ResultadoEscritura> eliminar(String id) => _repo.eliminar(id);
 
-  void reiniciar() {
-    _registros.clear();
-    notifyListeners();
-  }
+  /// Deshacer una eliminación: vuelve a crear el documento con el mismo ID.
+  Future<ResultadoEscritura> restaurar(RegistroReciclaje registro) =>
+      _repo.crear(registro);
 
-  /// Datos de ejemplo para probar la app y tomar capturas.
-  void cargarEjemplo() {
-    _registros.clear();
+  /// Borra TODOS los registros del usuario.
+  Future<ResultadoEscritura> reiniciar() => _repo.eliminarTodos(_uidActivo);
+
+  /// Escribe datos de ejemplo en Firestore para probar la app.
+  Future<ResultadoEscritura> cargarEjemplo() {
+    final uid = _uidActivo;
     final hoy = DateUtils.dateOnly(DateTime.now());
     DateTime hace(int dias) => hoy.subtract(Duration(days: dias));
+    RegistroReciclaje r(String materialId, double kg, int objetos,
+            LugarEntrega lugar, bool limpio, int dias, [String nota = '']) =>
+        _construir(
+          id: _repo.nuevoId(),
+          uid: uid,
+          material: materialPorId(materialId),
+          kg: kg,
+          objetos: objetos,
+          lugar: lugar,
+          limpio: limpio,
+          fecha: hace(dias),
+          nota: nota,
+        );
 
-    _registros.addAll([
-      _crear(material: materialPorId('plastico'), kg: 2.5, objetos: 18,
-          lugar: LugarEntrega.reciclador, limpio: true, fecha: hace(0),
-          nota: 'Botellas del apartamento'),
-      _crear(material: materialPorId('papel'), kg: 4.0, objetos: 12,
-          lugar: LugarEntrega.puntoReciclaje, limpio: true, fecha: hace(1)),
-      _crear(material: materialPorId('metal'), kg: 1.2, objetos: 25,
-          lugar: LugarEntrega.reciclador, limpio: false, fecha: hace(2)),
-      _crear(material: materialPorId('vidrio'), kg: 3.0, objetos: 6,
-          lugar: LugarEntrega.institucion, limpio: true, fecha: hace(3),
-          nota: 'Campaña del colegio'),
-      _crear(material: materialPorId('organico'), kg: 5.0, objetos: 1,
-          lugar: LugarEntrega.puntoReciclaje, limpio: false, fecha: hace(4)),
-      _crear(material: materialPorId('tetrapak'), kg: 0.8, objetos: 9,
-          lugar: LugarEntrega.puntoReciclaje, limpio: true, fecha: hace(5)),
+    return _repo.crearVarios([
+      r('plastico', 2.5, 18, LugarEntrega.reciclador, true, 0, 'Botellas del apartamento'),
+      r('papel', 4.0, 12, LugarEntrega.puntoReciclaje, true, 1),
+      r('metal', 1.2, 25, LugarEntrega.reciclador, false, 2),
+      r('vidrio', 3.0, 6, LugarEntrega.institucion, true, 3, 'Campaña del colegio'),
+      r('organico', 5.0, 1, LugarEntrega.puntoReciclaje, false, 4),
+      r('tetrapak', 0.8, 9, LugarEntrega.puntoReciclaje, true, 5),
     ]);
-    _ordenar();
-    notifyListeners();
   }
 
   // ---------- Estadísticas ----------

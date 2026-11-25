@@ -2,14 +2,18 @@ import 'package:flutter/material.dart';
 
 import '../data/materiales.dart';
 import '../models/material_reciclable.dart';
+import '../services/auth_service.dart';
 import '../state/reciclaje_state.dart';
 import '../theme/app_theme.dart';
+import '../utils/dialogos.dart';
+import '../utils/errores.dart';
 import '../utils/formato.dart';
 import '../utils/mensajes.dart';
 import '../widgets/contenedor_info.dart';
+import '../widgets/estado_sync.dart';
 import '../widgets/stat_card.dart';
 
-/// PANTALLA 1: principal.
+/// PANTALLA 1: inicio.
 class HomeScreen extends StatelessWidget {
   final ValueChanged<int> onIrA;
 
@@ -40,6 +44,30 @@ class HomeScreen extends StatelessWidget {
     );
   }
 
+  Future<void> _cerrarSesion(BuildContext context) async {
+    final ok = await confirmarAccion(
+      context,
+      titulo: 'Cerrar sesión',
+      mensaje: '¿Deseas cerrar tu sesión en Eco Barranquilla?',
+      textoConfirmar: 'Cerrar sesión',
+      icono: Icons.logout,
+    );
+    if (!ok) return;
+    await servicioAuth.cerrarSesion();
+  }
+
+  Future<void> _cargarEjemplo(BuildContext context) async {
+    try {
+      await estadoApp.cargarEjemplo();
+      if (!context.mounted) return;
+      mostrarMensaje(context, 'Se guardaron datos de ejemplo en Firebase.',
+          tipo: TipoMensaje.info);
+    } catch (e) {
+      if (!context.mounted) return;
+      mostrarMensaje(context, mensajeError(e), tipo: TipoMensaje.error);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
@@ -56,10 +84,12 @@ class HomeScreen extends StatelessWidget {
             title: const Text('Eco Barranquilla'),
             backgroundColor: AppColors.verde,
             foregroundColor: Colors.white,
-            actions: const [
-              Padding(
-                padding: EdgeInsets.only(right: 12),
-                child: Icon(Icons.recycling),
+            actions: [
+              const Center(child: EstadoSync(compacto: true)),
+              IconButton(
+                tooltip: 'Cerrar sesión',
+                icon: const Icon(Icons.logout),
+                onPressed: () => _cerrarSesion(context),
               ),
             ],
           ),
@@ -81,9 +111,9 @@ class HomeScreen extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text(
-                      '¡Hola, eco-ciudadano!',
-                      style: TextStyle(
+                    Text(
+                      '¡Hola, ${servicioAuth.nombreUsuario}!',
+                      style: const TextStyle(
                         color: Colors.white,
                         fontSize: 22,
                         fontWeight: FontWeight.bold,
@@ -180,6 +210,20 @@ class HomeScreen extends StatelessWidget {
                   ),
                 ),
               ),
+              const SizedBox(height: 10),
+              OutlinedButton.icon(
+                onPressed: () => onIrA(3),
+                icon: const Icon(Icons.place),
+                label: const Text('Dónde llevar mi reciclaje'),
+                style: OutlinedButton.styleFrom(
+                  minimumSize: const Size.fromHeight(52),
+                  foregroundColor: AppColors.verde,
+                  side: const BorderSide(color: AppColors.verde),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+              ),
               const SizedBox(height: 24),
 
               // ---- Guía rápida ----
@@ -219,14 +263,7 @@ class HomeScreen extends StatelessWidget {
               const SizedBox(height: 8),
               Center(
                 child: TextButton.icon(
-                  onPressed: () {
-                    estadoApp.cargarEjemplo();
-                    mostrarMensaje(
-                      context,
-                      'Se cargaron datos de ejemplo.',
-                      tipo: TipoMensaje.info,
-                    );
-                  },
+                  onPressed: () => _cargarEjemplo(context),
                   icon: const Icon(Icons.science_outlined),
                   label: const Text('Cargar datos de ejemplo'),
                 ),

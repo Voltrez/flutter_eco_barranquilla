@@ -2,9 +2,10 @@ import 'package:flutter/material.dart';
 
 import 'consulta_screen.dart';
 import 'home_screen.dart';
+import 'puntos_screen.dart';
 import 'registro_screen.dart';
 
-/// Contiene la barra de navegación inferior y las 3 pantallas.
+/// Contiene la barra de navegación inferior y las pantallas principales.
 class AppShell extends StatefulWidget {
   const AppShell({super.key});
 
@@ -26,6 +27,7 @@ class _AppShellState extends State<AppShell> {
           HomeScreen(onIrA: _irA),
           RegistroScreen(onIrA: _irA),
           ConsultaScreen(onIrA: _irA),
+          const PuntosScreen(),
         ],
       ),
       bottomNavigationBar: NavigationBar(
@@ -46,6 +48,11 @@ class _AppShellState extends State<AppShell> {
             icon: Icon(Icons.bar_chart_outlined),
             selectedIcon: Icon(Icons.bar_chart),
             label: 'Mi impacto',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.place_outlined),
+            selectedIcon: Icon(Icons.place),
+            label: 'Puntos',
           ),
         ],
       ),
